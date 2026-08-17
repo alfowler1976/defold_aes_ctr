@@ -1,0 +1,71 @@
+- name: aes_ctr
+  type: table
+  desc: secure a string using AES
+
+  members:
+    - name: encrypt_using_key
+      desc: encode a string save the IV and store the checksum
+      type: function
+      parameters:
+        - name: data
+          type: string
+          desc: data to encode.
+        - name: key
+          type: table
+          desc: A table of 32 integer numbers between 0-255.  Throws an error table length is not 32 or it finds non numbers
+      returns:
+        - name: data
+          type: string
+          desc: The processed encrypted binary string with iv and checksum.
+
+    - name: decrypt_using_key
+      desc: decode a string encoded by encrypt_aes_ctr_sha
+      type: function
+      parameters:
+        - name: data
+          type: string
+          desc: previously encoded data.
+        - name: key
+          type: table
+          desc: A table of 32 integer numbers between 0-255.  Throws an error table length is not 32 or it finds non numbers
+      returns:
+        - name: data
+          type: string
+          desc: The processed decrypted binary string.
+        - name: err
+          type: string
+          desc: any error.
+
+    - name: encrypt_using_seed
+      desc: encode a string save the IV and store the checksum
+      type: function
+      parameters:
+        - name: data
+          type: string
+          desc: data to encode.
+        - name: seed
+          type: string
+          desc: a string used internally to generate a key
+      returns:
+        - name: data
+          type: string
+          desc: The processed encrypted binary string with iv and checksum.
+
+    - name: decrypt_using_seed
+      desc: decode a string encoded by encrypt_aes_ctr_sha
+      type: function
+      parameters:
+        - name: data
+          type: string
+          desc: previously encoded data.
+        - name: seed
+          type: string
+          desc: a string used internally to generate a key
+      returns:
+        - name: data
+          type: string
+          desc: The processed decrypted binary string.
+        - name: err
+          type: string
+          desc: any error.
+    
