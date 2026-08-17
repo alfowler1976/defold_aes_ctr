@@ -41,6 +41,8 @@ Returns:
 **aes_ctr.encrypt_using_seed(data, seed)**
 
 Encrypts the data using an AES function. It generates a key (derived from the seed) an IV internally. The return is a string with the encrypted data, IV and checksum for tampering detection.
+This provides a little more protection against reverse engineering as the key is never revealed in lua
+
 Parameters:
 
 - data (string): The raw binary or text string to be encrypted
