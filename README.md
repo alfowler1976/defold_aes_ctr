@@ -67,3 +67,11 @@ Returns:
 
 - (string): The binary string containing the IV, encrypted data and checksum. return nil if fails
 - (string): error string (optional. only returns if fail)
+
+ # Important Notes
+
+Client-Side Security: LuaJIT is relatively easy to decompile, so storing keys directly in client-side code will make them easy to extract. The seed-based variants offer more protection because the key is generated internally—meaning it never appears in Lua. Even if an attacker discovers the seed, they would have to decompile and reverse-engineer the C++ code to obtain the key, which is significantly harder.
+
+Customization: If you want even more protection, you can download the code and include it directly in your project rather than using it as a remote dependency. This allows you to customize internal elements, such as modifying the generate_key_from_seed function to create a completely unique implementation.
+
+Testing & Data Backups (Disclaimer): While this extension works perfectly well for my own project, it has not been exhaustively tested across every possible situation or environment. Always keep a backup of your raw, unencrypted data before running it through encryption functions, just in case you run into any unexpected issues
