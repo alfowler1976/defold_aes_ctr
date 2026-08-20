@@ -20,7 +20,7 @@ see [API Reference](https://github.com/alfowler1976/defold_aes_ctr/wiki/API-Refe
 
 see [Important Notes](https://github.com/alfowler1976/defold_aes_ctr/wiki/Important-notes)
 
-## New settings for v0.9.1.
+## New for v0.9.1.
 
 This introduces two new functions:
 * [aes_ctr.encrypt_using_seed_v2](https://github.com/alfowler1976/defold_aes_ctr/wiki/API-Reference#aes_ctrencrypt_using_seed_v2data-seed)
