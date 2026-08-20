@@ -19,6 +19,10 @@ static uint8_t global_app_salt[8] = { 0x58, 0x9A, 0x2C, 0xF1, 0x7E, 0x33, 0x0B, 
 static int global_hash_rounds = 200; //
 
 
+// ---------------------------------------------------------
+// helper functions
+// ---------------------------------------------------------
+
 static void secure_wipe(void* ptr, size_t size) 
 {
 	volatile uint8_t* p = static_cast<volatile uint8_t*>(ptr);
@@ -73,7 +77,73 @@ static bool read_byte_array_from_table(lua_State* L, int index, std::vector<uint
 	return true;
 }
 
+// ---------------------------------------------------------
+// key generation functions
+// ---------------------------------------------------------
+
+
 static bool generate_key_from_seed(lua_State* L, int index, std::vector<uint8_t>& out_vector) {
+
+	// ensure is string
+	if (!lua_isstring(L, index)) {
+		lua_pushfstring(L, "bad argument #%d (string expected, got %s)", index, luaL_typename(L, index));
+		return false;
+	}
+
+	// get string 
+	size_t seed_len;
+	const char* seed_str = lua_tolstring(L, index, &seed_len);
+
+	// check length
+	if (seed_len == 0) {
+		lua_pushfstring(L, "bad argument #%d (seed string cannot be empty)", index);
+		return false;
+	}
+
+	// define a hardcoded app-specific salt vector to mix with the user seed.
+	// alter these numbers and add more and then use encrypt_aes_ctr_seed and decrypt_aes_ctr_seed for a personal implenmentation
+	
+	const uint8_t app_salt[] = { 0x58, 0x9A, 0x2C, 0xF1, 0x7E, 0x33, 0x0B, 0xE4 };
+
+	// build an initial combined buffer: [User Seed + Salt + Length Marker]
+	std::vector<uint8_t> buffer;
+	buffer.reserve(seed_len + sizeof(app_salt) + 4);
+
+	buffer.insert(buffer.end(), seed_str, seed_str + seed_len);
+	buffer.insert(buffer.end(), app_salt, app_salt + sizeof(app_salt));
+
+	// append the seed length as extra confusion bytes
+	buffer.push_back(static_cast<uint8_t>(seed_len & 0xFF));
+	buffer.push_back(static_cast<uint8_t>((seed_len >> 8) & 0xFF));
+
+	// initial hash pass
+	std::vector<uint8_t> current_hash = sha::compute(buffer, buffer.data(), buffer.size());
+
+	// mess about with 
+	// alter rounds
+	for (int round = 0; round < 200; ++round) {
+		std::vector<uint8_t> round_input;
+		round_input.reserve(current_hash.size() + sizeof(app_salt) + 2);
+
+		// feed the previous hash back in, mixed with salt and a round counter
+		round_input.insert(round_input.end(), current_hash.begin(), current_hash.end());
+		round_input.insert(round_input.end(), app_salt, app_salt + sizeof(app_salt));
+		round_input.push_back(static_cast<uint8_t>(round & 0xFF));
+		round_input.push_back(static_cast<uint8_t>((round >> 8) & 0xFF));
+
+		current_hash = sha::compute(round_input, round_input.data(), round_input.size());
+	}
+
+	// output vector becomes our heavily mutated, stretched 32-byte key
+	out_vector = current_hash;
+
+	// wipe intermediate buffers from memory before returning
+	secure_wipe(buffer.data(), buffer.size());
+
+	return true;
+}
+
+static bool generate_key_from_seed_v2(lua_State* L, int index, std::vector<uint8_t>& out_vector) {
 
 	// ensure is string
 	if (!lua_isstring(L, index)) {
@@ -143,32 +213,19 @@ static void generate_random_iv(std::vector<uint8_t>& iv) {
 		iv[i] = (uint8_t)((rand() + seed_counter + i) % 256);
 	}
 }
+// ---------------------------------------------------------
+// core encryptions and decryption functions
+// ---------------------------------------------------------
 
-static int encrypt_aes_ctr_key(lua_State* L) {
-
-	size_t data_len;
-	const char* data = luaL_checklstring(L, 1, &data_len);
-
-	// if no data then return error
-	if (data_len == 0) {
-		return luaL_error(L, "Data cannot be empty.");
-	}
-	
-	// read key from lua table
-	std::vector<uint8_t> key;
-	if (!read_byte_array_from_table(L, 2, key, 32)) {
-		return lua_error(L); 
-	}
-
-	// generate IV
+static int perform_encryption_with_key(lua_State* L, std::vector<uint8_t>& key, const char* data, size_t data_len) {
 	std::vector<uint8_t> iv;
 	generate_random_iv(iv); 
 
 	const size_t iv_size = 16;
 	const size_t checksum_size = 32; 
 
-	// prevent size_t overflow when calculating the blob size
 	if (data_len > SIZE_MAX - iv_size - checksum_size) {
+		secure_wipe(key.data(), key.size()); // Secure exit patch
 		return luaL_error(L, "Data is too large to encrypt.");
 	}
 
@@ -187,34 +244,12 @@ static int encrypt_aes_ctr_key(lua_State* L) {
 
 	lua_pushlstring(L, (const char*)blob.data(), blob.size());
 
-	// wipe data from memory
 	secure_wipe(key.data(), key.size());
 	secure_wipe(&ctx, sizeof(ctx));
-	
 	return 1;
 }
 
-static int decrypt_aes_ctr_key(lua_State* L) 
-{
-	size_t blob_len;
-	const char* blob_data = luaL_checklstring(L, 1, &blob_len);
-
-	// check if data string is too short
-	if (blob_len < 48) {
-		return luaL_error(L, "Invalid save data: blob too short.");
-	}
-
-	// check if technically there is no data
-	if (blob_len == 48) {
-		return luaL_error(L, "Invalid save data: blob contains no data.");
-	}
-
-	// read key
-	std::vector<uint8_t> key;
-	if (!read_byte_array_from_table(L, 2, key, 32)) {
-		return lua_error(L); 
-	}
-
+static int perform_decryption_with_key(lua_State* L, std::vector<uint8_t>& key, const char* blob_data, size_t blob_len) {
 	const size_t iv_size = 16;
 	const size_t checksum_size = 32;
 	size_t data_len = blob_len - iv_size - checksum_size;
@@ -226,8 +261,7 @@ static int decrypt_aes_ctr_key(lua_State* L)
 	std::vector<uint8_t> iv(iv_ptr, iv_ptr + iv_size);
 	std::vector<uint8_t> data(data_ptr, data_ptr + data_len);
 
-	if (!sha::verify(key, (const uint8_t*)blob_data,
-	iv_size + data_len, stored_checksum_ptr)) {
+	if (!sha::verify(key, (const uint8_t*)blob_data, iv_size + data_len, stored_checksum_ptr)) {
 		secure_wipe(key.data(), key.size());
 		lua_pushnil(L);
 		lua_pushstring(L, "Tamper check failed!");
@@ -240,118 +274,93 @@ static int decrypt_aes_ctr_key(lua_State* L)
 
 	lua_pushlstring(L, (const char*)data.data(), data.size());
 
-	// wipe data from memory
 	secure_wipe(key.data(), key.size());
 	secure_wipe(&ctx, sizeof(ctx));
-	
 	return 1;
+}
+
+
+// ---------------------------------------------------------
+// lua wrapper functions
+// ---------------------------------------------------------
+
+static int encrypt_aes_ctr_key(lua_State* L) {
+	size_t data_len;
+	const char* data = luaL_checklstring(L, 1, &data_len);
+	if (data_len == 0) return luaL_error(L, "Data cannot be empty.");
+
+	std::vector<uint8_t> key;
+	if (!read_byte_array_from_table(L, 2, key, 32)) return lua_error(L); 
+
+	return perform_encryption_with_key(L, key, data, data_len);
+}
+
+static int decrypt_aes_ctr_key(lua_State* L) {
+	size_t blob_len;
+	const char* blob_data = luaL_checklstring(L, 1, &blob_len);
+	if (blob_len < 48) return luaL_error(L, "Invalid save data: blob too short.");
+	if (blob_len == 48) return luaL_error(L, "Invalid save data: blob contains no data.");
+
+	std::vector<uint8_t> key;
+	if (!read_byte_array_from_table(L, 2, key, 32)) return lua_error(L); 
+
+	return perform_decryption_with_key(L, key, blob_data, blob_len);
 }
 
 static int encrypt_aes_ctr_seed(lua_State* L) {
-
 	size_t data_len;
 	const char* data = luaL_checklstring(L, 1, &data_len);
-
-	// if no data then return error
-	if (data_len == 0) {
-		return luaL_error(L, "Data cannot be empty.");
-	}
+	if (data_len == 0) return luaL_error(L, "Data cannot be empty.");
 
 	std::vector<uint8_t> key;
-	if (!generate_key_from_seed(L, 2, key)) {
-		return lua_error(L); 
-	}
+	if (!generate_key_from_seed(L, 2, key)) return lua_error(L); 
 
-	std::vector<uint8_t> iv;
-	generate_random_iv(iv); 
-
-	const size_t iv_size = 16;
-	const size_t checksum_size = 32; 
-
-	// Prevent size_t overflow when calculating the blob size
-	if (data_len > SIZE_MAX - iv_size - checksum_size) {
-		return luaL_error(L, "Data is too large to encrypt.");
-	}
-
-	std::vector<uint8_t> blob;
-	blob.resize(iv_size + data_len + checksum_size);
-
-	std::memcpy(blob.data(), iv.data(), iv_size);
-	std::memcpy(blob.data() + iv_size, data, data_len);
-
-	struct AES_ctx ctx;
-	AES_init_ctx_iv(&ctx, key.data(), iv.data());
-	AES_CTR_xcrypt_buffer(&ctx, blob.data() + iv_size, data_len);
-
-	std::vector<uint8_t> checksum = sha::compute(key, blob.data(), iv_size + data_len);
-	std::memcpy(blob.data() + iv_size + data_len, checksum.data(), checksum_size);
-
-	lua_pushlstring(L, (const char*)blob.data(), blob.size());
-
-	// wipe data from memory
-	secure_wipe(key.data(), key.size());
-	secure_wipe(&ctx, sizeof(ctx));
-	return 1;
+	return perform_encryption_with_key(L, key, data, data_len);
 }
 
-static int decrypt_aes_ctr_seed(lua_State* L) 
-{
+static int decrypt_aes_ctr_seed(lua_State* L) {
 	size_t blob_len;
 	const char* blob_data = luaL_checklstring(L, 1, &blob_len);
+	if (blob_len < 48) return luaL_error(L, "Invalid save data: blob too short.");
+	if (blob_len == 48) return luaL_error(L, "Invalid save data: blob contains no data.");
 
-	// check if data string is too short
-	if (blob_len < 48) {
-		return luaL_error(L, "Invalid save data: blob too short.");
-	}
-
-	// check if technically there is no data
-	if (blob_len == 48) {
-		return luaL_error(L, "Invalid save data: blob contains no data.");
-	}
-
-	// read key
 	std::vector<uint8_t> key;
-	if (!generate_key_from_seed(L, 2, key)) {
-		return lua_error(L); 
-	}
+	if (!generate_key_from_seed(L, 2, key)) return lua_error(L); 
 
-	const size_t iv_size = 16;
-	const size_t checksum_size = 32;
-	size_t data_len = blob_len - iv_size - checksum_size;
-
-	const uint8_t* iv_ptr = (const uint8_t*)blob_data;
-	const uint8_t* data_ptr = iv_ptr + iv_size;
-	const uint8_t* stored_checksum_ptr = data_ptr + data_len;
-
-	std::vector<uint8_t> iv(iv_ptr, iv_ptr + iv_size);
-	std::vector<uint8_t> data(data_ptr, data_ptr + data_len);
-
-	if (!sha::verify(key, (const uint8_t*)blob_data,
-	iv_size + data_len, stored_checksum_ptr)) {
-		secure_wipe(key.data(), key.size());
-		lua_pushnil(L);
-		lua_pushstring(L, "Tamper check failed!");
-		return 2;
-	}
-
-	struct AES_ctx ctx;
-	AES_init_ctx_iv(&ctx, key.data(), iv.data());
-	AES_CTR_xcrypt_buffer(&ctx, data.data(), data.size());
-
-	lua_pushlstring(L, (const char*)data.data(), data.size());
-
-	// wipe data from memory
-	secure_wipe(key.data(), key.size());
-	secure_wipe(&ctx, sizeof(ctx));
-
-	return 1;
+	return perform_decryption_with_key(L, key, blob_data, blob_len);
 }
+
+static int encrypt_aes_ctr_seed_v2(lua_State* L) {
+	size_t data_len;
+	const char* data = luaL_checklstring(L, 1, &data_len);
+	if (data_len == 0) return luaL_error(L, "Data cannot be empty.");
+
+	std::vector<uint8_t> key;
+	if (!generate_key_from_seed_v2(L, 2, key)) return lua_error(L); 
+
+	return perform_encryption_with_key(L, key, data, data_len);
+}
+
+static int decrypt_aes_ctr_seed_v2(lua_State* L) {
+	size_t blob_len;
+	const char* blob_data = luaL_checklstring(L, 1, &blob_len);
+	if (blob_len < 48) return luaL_error(L, "Invalid save data: blob too short.");
+	if (blob_len == 48) return luaL_error(L, "Invalid save data: blob contains no data.");
+
+	std::vector<uint8_t> key;
+	if (!generate_key_from_seed_v2(L, 2, key)) return lua_error(L); 
+
+	return perform_decryption_with_key(L, key, blob_data, blob_len);
+}
+
 
 static const luaL_reg Module_methods[] = {
 	{"encrypt_using_key", encrypt_aes_ctr_key},
 	{"decrypt_using_key", decrypt_aes_ctr_key},     
 	{"encrypt_using_seed", encrypt_aes_ctr_seed},
 	{"decrypt_using_seed", decrypt_aes_ctr_seed},   
+	{"encrypt_using_seed_v2", encrypt_aes_ctr_seed_v2},
+	{"decrypt_using_seed_v2", decrypt_aes_ctr_seed_v2},   
 	{0, 0}
 };
 
@@ -363,8 +372,13 @@ static void LuaInit(lua_State* L) {
 
 static dmExtension::Result AppInitializeSecureString(dmExtension::AppParams* params) 
 { 
+	
 	// get global rounds - if not found then 
-	global_hash_rounds = dmConfigFile::GetInt(params->m_ConfigFile, "aes_ctr.rounds", 200);
+	int rounds = dmConfigFile::GetInt(params->m_ConfigFile, "aes_ctr.rounds", 200);
+	if (rounds < 10) rounds = 10;
+	if (rounds > 10000) rounds = 10000;
+	global_hash_rounds = rounds;
+	
 
 	// get app salt
 	char key_name[32];
