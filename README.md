@@ -4,6 +4,10 @@ It uses the tiny-AES implementation from <https://github.com/kokke/tiny-AES-c/tr
 
 ** Please read the installation and important note pages before using. **
 
+# Wiki
+
+[wiki](https://github.com/alfowler1976/defold_aes_ctr/wiki)
+
 # Installation
 
 See [Installation](https://github.com/alfowler1976/defold_aes_ctr/wiki/Installation)
