@@ -13,6 +13,12 @@
 #include "sha.hpp"
 
 
+
+// Define global fallback values based on your original hardcoded settings
+static uint8_t global_app_salt[8] = { 0x58, 0x9A, 0x2C, 0xF1, 0x7E, 0x33, 0x0B, 0xE4 }; //
+static int global_hash_rounds = 200; //
+
+
 static void secure_wipe(void* ptr, size_t size) 
 {
 	volatile uint8_t* p = static_cast<volatile uint8_t*>(ptr);
@@ -85,15 +91,12 @@ static bool generate_key_from_seed(lua_State* L, int index, std::vector<uint8_t>
 		return false;
 	}
 
-	// define a hardcoded app-specific salt vector to mix with the user seed.
-	const uint8_t app_salt[] = { 0x58, 0x9A, 0x2C, 0xF1, 0x7E, 0x33, 0x0B, 0xE4 };
-
 	// build an initial combined buffer: [User Seed + Salt + Length Marker]
 	std::vector<uint8_t> buffer;
-	buffer.reserve(seed_len + sizeof(app_salt) + 4);
+	buffer.reserve(seed_len + sizeof(global_app_salt) + 4);
 
 	buffer.insert(buffer.end(), seed_str, seed_str + seed_len);
-	buffer.insert(buffer.end(), app_salt, app_salt + sizeof(app_salt));
+	buffer.insert(buffer.end(), global_app_salt, global_app_salt + sizeof(global_app_salt));
 
 	// append the seed length as extra confusion bytes
 	buffer.push_back(static_cast<uint8_t>(seed_len & 0xFF));
@@ -103,13 +106,13 @@ static bool generate_key_from_seed(lua_State* L, int index, std::vector<uint8_t>
 	std::vector<uint8_t> current_hash = sha::compute(buffer, buffer.data(), buffer.size());
 
 	// mess about with 
-	for (int round = 0; round < 200; ++round) {
+	for (int round = 0; round < global_hash_rounds; ++round) {
 		std::vector<uint8_t> round_input;
-		round_input.reserve(current_hash.size() + sizeof(app_salt) + 2);
+		round_input.reserve(current_hash.size() + sizeof(global_app_salt) + 2);
 
 		// feed the previous hash back in, mixed with salt and a round counter
 		round_input.insert(round_input.end(), current_hash.begin(), current_hash.end());
-		round_input.insert(round_input.end(), app_salt, app_salt + sizeof(app_salt));
+		round_input.insert(round_input.end(), global_app_salt, global_app_salt + sizeof(global_app_salt));
 		round_input.push_back(static_cast<uint8_t>(round & 0xFF));
 		round_input.push_back(static_cast<uint8_t>((round >> 8) & 0xFF));
 
@@ -358,8 +361,35 @@ static void LuaInit(lua_State* L) {
 	lua_pop(L, 1);
 }
 
-static dmExtension::Result AppInitializeSecureString(dmExtension::AppParams* params) { return dmExtension::RESULT_OK; }
-static dmExtension::Result InitializeSecureString(dmExtension::Params* params) {
+static dmExtension::Result AppInitializeSecureString(dmExtension::AppParams* params) 
+{ 
+	// get global rounds - if not found then 
+	global_hash_rounds = dmConfigFile::GetInt(params->m_ConfigFile, "aes_ctr.rounds", 200);
+
+	// get app salt
+	char key_name[32];
+	
+	for (int i = 0; i < 8; ++i) {
+		// dynamically build the string keys: "aes_ctr.salt_0", "aes_ctr.salt_1", etc.
+		snprintf(key_name, sizeof(key_name), "aes_ctr.salt_%02d", i+1);
+
+		// fetch the integer. if missing, it falls back to the original g_app_salt[i] value.
+		int32_t byte_val = dmConfigFile::GetInt(params->m_ConfigFile, key_name, global_app_salt[i]);
+
+		// Sanity check: clamp the value to ensure it fits safely within a standard 8-bit unsigned integer (0-255)
+		if (byte_val < 0) byte_val = 0;
+		if (byte_val > 255) byte_val = 255;
+
+		// Store it in our global array
+		global_app_salt[i] = static_cast<uint8_t>(byte_val);
+	}
+	
+	return dmExtension::RESULT_OK; 
+}
+
+
+static dmExtension::Result InitializeSecureString(dmExtension::Params* params) 
+{
 	LuaInit(params->m_L);
 	return dmExtension::RESULT_OK;
 }
